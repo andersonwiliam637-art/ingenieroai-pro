@@ -1,0 +1,3 @@
+RELEASE DECISION: NO-GO FOR PRODUCTION
+
+The static checks pass. The package has not passed a real Next.js build, PostgreSQL/Neon migration, Auth.js email delivery, live two-tenant RLS tests, webhook/payment fraud tests, or load/restore testing. Do not process live customer data or payments until the production gates in PRODUCTION_READINESS.md are completed.
