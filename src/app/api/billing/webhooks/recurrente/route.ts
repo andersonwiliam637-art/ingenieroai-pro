@@ -40,7 +40,8 @@ export async function POST(request: Request) {
   let event: RecurrenteEvent;
   try {
     const verifier = new Webhook(secret);
-    event = verifier.verify(rawBody, svixHeaders) as RecurrenteEvent;
+    verifier.verify(rawBody, svixHeaders);
+    event = JSON.parse(rawBody) as RecurrenteEvent;
   } catch {
     return NextResponse.json({ ok: false, error: "INVALID_SIGNATURE" }, { status: 400 });
   }
