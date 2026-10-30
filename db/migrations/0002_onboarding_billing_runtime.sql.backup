@@ -1,0 +1,394 @@
+-- IngenieroAI.pro incremental migration 0002
+-- Adds secure first-organization onboarding and provider-verified billing hooks.
+-- Additive only: does not drop or rewrite existing business data.
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS public.organization_registration_requests (
+  email text PRIMARY KEY,
+  full_name text NOT NULL,
+  organization_name text NOT NULL,
+  region public.organization_region NOT NULL,
+  country_code text NOT NULL,
+  currency_code text NOT NULL,
+  locale text NOT NULL,
+  timezone text NOT NULL,
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS organization_registration_requests_expiry_idx
+  ON public.organization_registration_requests(expires_at);
+
+-- Each organization has one current subscription. Refuse to continue if old data violates this invariant.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM public.subscriptions GROUP BY organization_id HAVING count(*) > 1) THEN
+    RAISE EXCEPTION 'DUPLICATE_ORGANIZATION_SUBSCRIPTIONS_REQUIRE_REVIEW';
+  END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS subscriptions_one_per_organization_idx
+  ON public.subscriptions(organization_id);
+CREATE INDEX IF NOT EXISTS payment_transactions_provider_payment_idx
+  ON public.payment_transactions(provider, provider_payment_id);
+
+-- The existing audit_events_id_seq exists, but audit_events.id has no default in the
+-- reviewed production schema. Assign it without changing any existing rows.
+ALTER TABLE public.audit_events
+  ALTER COLUMN id SET DEFAULT nextval('public.audit_events_id_seq'::regclass);
+ALTER SEQUENCE public.audit_events_id_seq OWNED BY public.audit_events.id;
+SELECT setval('public.audit_events_id_seq'::regclass,
+  GREATEST(COALESCE((SELECT max(id) FROM public.audit_events), 0),
+           (SELECT last_value FROM public.audit_events_id_seq)), true);
+
+-- Requests can only be touched by the two owner-privileged functions below.
+ALTER TABLE public.organization_registration_requests ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON public.organization_registration_requests FROM PUBLIC;
+REVOKE ALL ON public.organization_registration_requests FROM ingenieroai_runtime;
+
+-- Safe, zero-cost onboarding plan. Paid plans must be added with explicit approved prices.
+DROP POLICY IF EXISTS subscription_plans_active_read ON public.subscription_plans;
+CREATE POLICY subscription_plans_active_read ON public.subscription_plans
+  FOR SELECT TO ingenieroai_runtime USING (active = true);
+
+INSERT INTO public.subscription_plans
+  (code, name, currency_code, amount, interval_code, active, region, currency,
+   amount_minor, billing_interval, features)
+VALUES
+  ('starter-free', 'Starter Free', 'USD', 0, 'monthly', true, 'GLOBAL', 'USD',
+   0, 'month', '{"tier":"free","modules":["crm","sales","inventory","reports"],"limits":{"users":3}}'::jsonb)
+ON CONFLICT (code) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION private.request_organization_registration(
+  p_email text,
+  p_full_name text,
+  p_organization_name text,
+  p_region text,
+  p_country_code text
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, private
+AS $$
+DECLARE
+  v_email text := lower(trim(p_email));
+  v_name text := trim(p_full_name);
+  v_org text := trim(p_organization_name);
+  v_region public.organization_region;
+  v_country text := upper(trim(p_country_code));
+  v_currency text;
+  v_locale text;
+  v_timezone text;
+BEGIN
+  IF length(v_email) > 254 OR v_email !~ '^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$' THEN
+    RAISE EXCEPTION 'INVALID_REGISTRATION_INPUT' USING ERRCODE = '22023';
+  END IF;
+  IF length(v_name) < 2 OR length(v_name) > 120 OR length(v_org) < 2 OR length(v_org) > 120 THEN
+    RAISE EXCEPTION 'INVALID_REGISTRATION_INPUT' USING ERRCODE = '22023';
+  END IF;
+  IF upper(trim(p_region)) NOT IN ('LATAM','UAE') THEN
+    RAISE EXCEPTION 'INVALID_REGISTRATION_REGION' USING ERRCODE = '22023';
+  END IF;
+  v_region := upper(trim(p_region))::public.organization_region;
+
+  IF v_region = 'UAE' THEN
+    IF v_country <> 'AE' THEN RAISE EXCEPTION 'INVALID_REGION_COUNTRY' USING ERRCODE = '22023'; END IF;
+    v_currency := 'AED'; v_locale := 'en-AE'; v_timezone := 'Asia/Dubai';
+  ELSE
+    IF v_country NOT IN ('GT','MX','CO','SV','HN','CR','PA','DO','PE','CL','AR','BR','NI','BO','PY','UY','EC') THEN
+      RAISE EXCEPTION 'INVALID_REGION_COUNTRY' USING ERRCODE = '22023';
+    END IF;
+    v_currency := CASE v_country
+      WHEN 'GT' THEN 'GTQ' WHEN 'MX' THEN 'MXN' WHEN 'CO' THEN 'COP'
+      WHEN 'SV' THEN 'USD' WHEN 'HN' THEN 'HNL' WHEN 'CR' THEN 'CRC'
+      WHEN 'PA' THEN 'USD' WHEN 'DO' THEN 'DOP' WHEN 'PE' THEN 'PEN'
+      WHEN 'CL' THEN 'CLP' WHEN 'AR' THEN 'ARS' WHEN 'BR' THEN 'BRL'
+      WHEN 'NI' THEN 'NIO' WHEN 'BO' THEN 'BOB' WHEN 'PY' THEN 'PYG'
+      WHEN 'UY' THEN 'UYU' WHEN 'EC' THEN 'USD' ELSE 'USD' END;
+    v_locale := CASE v_country WHEN 'GT' THEN 'es-GT' WHEN 'MX' THEN 'es-MX'
+      WHEN 'CO' THEN 'es-CO' WHEN 'SV' THEN 'es-SV' WHEN 'HN' THEN 'es-HN'
+      WHEN 'CR' THEN 'es-CR' WHEN 'PA' THEN 'es-PA' WHEN 'DO' THEN 'es-DO'
+      WHEN 'PE' THEN 'es-PE' WHEN 'CL' THEN 'es-CL' WHEN 'AR' THEN 'es-AR'
+      WHEN 'BR' THEN 'pt-BR' WHEN 'NI' THEN 'es-NI' WHEN 'BO' THEN 'es-BO'
+      WHEN 'PY' THEN 'es-PY' WHEN 'UY' THEN 'es-UY' WHEN 'EC' THEN 'es-EC'
+      ELSE 'es' END;
+    v_timezone := CASE v_country WHEN 'GT' THEN 'America/Guatemala'
+      WHEN 'MX' THEN 'America/Mexico_City' WHEN 'CO' THEN 'America/Bogota'
+      WHEN 'SV' THEN 'America/El_Salvador' WHEN 'HN' THEN 'America/Tegucigalpa'
+      WHEN 'CR' THEN 'America/Costa_Rica' WHEN 'PA' THEN 'America/Panama'
+      WHEN 'DO' THEN 'America/Santo_Domingo' WHEN 'PE' THEN 'America/Lima'
+      WHEN 'CL' THEN 'America/Santiago' WHEN 'AR' THEN 'America/Argentina/Buenos_Aires'
+      WHEN 'BR' THEN 'America/Sao_Paulo' WHEN 'NI' THEN 'America/Managua'
+      WHEN 'BO' THEN 'America/La_Paz' WHEN 'PY' THEN 'America/Asuncion'
+      WHEN 'UY' THEN 'America/Montevideo' WHEN 'EC' THEN 'America/Guayaquil'
+      ELSE 'America/Guatemala' END;
+  END IF;
+
+  -- Existing tenant users may sign in but cannot self-attach/create another tenant through signup.
+  IF EXISTS (
+    SELECT 1 FROM public.users u JOIN public.memberships m ON m.user_id = u.id
+    WHERE lower(u.email) = v_email AND m.status = 'active'
+  ) THEN
+    RETURN false;
+  END IF;
+
+  INSERT INTO public.organization_registration_requests
+    (email, full_name, organization_name, region, country_code, currency_code, locale, timezone, requested_at, expires_at)
+  VALUES
+    (v_email, v_name, v_org, v_region, v_country, v_currency, v_locale, v_timezone, now(), now() + interval '24 hours')
+  ON CONFLICT (email) DO UPDATE SET
+    full_name = EXCLUDED.full_name,
+    organization_name = EXCLUDED.organization_name,
+    region = EXCLUDED.region,
+    country_code = EXCLUDED.country_code,
+    currency_code = EXCLUDED.currency_code,
+    locale = EXCLUDED.locale,
+    timezone = EXCLUDED.timezone,
+    requested_at = now(),
+    expires_at = now() + interval '24 hours'
+  WHERE public.organization_registration_requests.expires_at <= now()
+     OR public.organization_registration_requests.requested_at < now() - interval '1 minute';
+
+  RETURN FOUND;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.request_organization_registration(text,text,text,text,text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.request_organization_registration(text,text,text,text,text) TO ingenieroai_runtime;
+
+CREATE OR REPLACE FUNCTION private.provision_pending_organization(p_user_id uuid)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, private
+AS $$
+DECLARE
+  v_email text;
+  v_request public.organization_registration_requests%ROWTYPE;
+  v_org_id uuid;
+  v_owner_role uuid;
+  v_plan_id uuid;
+  v_base_slug text;
+  v_slug text;
+  v_tries integer := 0;
+  v_module public.module_code;
+  v_enabled boolean;
+BEGIN
+  SELECT lower(u.email) INTO v_email
+  FROM public.users u
+  WHERE u.id = p_user_id AND u."emailVerified" IS NOT NULL;
+  IF v_email IS NULL THEN RETURN NULL; END IF;
+
+  SELECT * INTO v_request
+  FROM public.organization_registration_requests r
+  WHERE r.email = v_email AND r.expires_at > now()
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN NULL; END IF;
+
+  UPDATE public.users SET name = coalesce(nullif(name, ''), v_request.full_name) WHERE id = p_user_id;
+
+  IF EXISTS (SELECT 1 FROM public.memberships WHERE user_id = p_user_id AND status = 'active') THEN
+    DELETE FROM public.organization_registration_requests WHERE email = v_email;
+    RETURN NULL;
+  END IF;
+
+  SELECT id INTO v_owner_role FROM public.roles WHERE code = 'owner'::public.role_code;
+  SELECT id INTO v_plan_id FROM public.subscription_plans WHERE code = 'starter-free' AND active = true;
+  IF v_owner_role IS NULL OR v_plan_id IS NULL THEN
+    RAISE EXCEPTION 'ONBOARDING_REFERENCE_DATA_MISSING';
+  END IF;
+
+  v_base_slug := trim(both '-' from regexp_replace(lower(v_request.organization_name), '[^a-z0-9]+', '-', 'g'));
+  IF v_base_slug = '' THEN v_base_slug := 'empresa'; END IF;
+  v_base_slug := left(v_base_slug, 48);
+
+  LOOP
+    v_tries := v_tries + 1;
+    IF v_tries = 1 THEN
+      v_slug := v_base_slug;
+    ELSE
+      v_slug := left(v_base_slug, 39) || '-' || left(replace(gen_random_uuid()::text, '-', ''), 8);
+    END IF;
+    BEGIN
+      INSERT INTO public.organizations (name, slug, region, country_code, currency_code, locale, timezone)
+      VALUES (v_request.organization_name, v_slug, v_request.region, v_request.country_code,
+              v_request.currency_code, v_request.locale, v_request.timezone)
+      RETURNING id INTO v_org_id;
+      EXIT;
+    EXCEPTION WHEN unique_violation THEN
+      IF v_tries >= 5 THEN RAISE; END IF;
+    END;
+  END LOOP;
+
+  INSERT INTO public.memberships (organization_id, user_id, role_id, status)
+  VALUES (v_org_id, p_user_id, v_owner_role, 'active');
+
+  -- Free onboarding exposes the basic LATAM or UAE module set only.
+  FOR v_module IN SELECT unnest(enum_range(NULL::public.module_code)) LOOP
+    v_enabled := CASE
+      WHEN v_request.region = 'LATAM' THEN v_module IN ('crm','sales','inventory','reports')
+      ELSE v_module IN ('crm','sales','inventory','reports','logistics','fleet','dispatch','delivery','cod')
+    END;
+    INSERT INTO public.organization_modules (organization_id, module, enabled, settings)
+    VALUES (v_org_id, v_module, v_enabled, '{}'::jsonb)
+    ON CONFLICT (organization_id, module) DO NOTHING;
+  END LOOP;
+
+  INSERT INTO public.subscriptions
+    (organization_id, plan_id, provider, status, current_period_start, current_period_end)
+  VALUES (v_org_id, v_plan_id, 'manual', 'active', now(), NULL)
+  ON CONFLICT (organization_id) DO NOTHING;
+
+  INSERT INTO public.audit_events (organization_id, actor_user_id, action, entity_type, metadata)
+  VALUES (v_org_id, p_user_id, 'organization.created', 'organization',
+          jsonb_build_object('source','verified_email_registration','plan','starter-free'));
+
+  DELETE FROM public.organization_registration_requests WHERE email = v_email;
+  RETURN v_org_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.provision_pending_organization(uuid) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.provision_pending_organization(uuid) TO ingenieroai_runtime;
+
+-- Apply a provider-verified result exactly once. The webhook handler must verify the
+-- provider's signature before calling this function. The function independently checks
+-- amount/currency against the immutable pending transaction before activating the plan.
+CREATE OR REPLACE FUNCTION private.apply_verified_payment(
+  p_provider text,
+  p_event_id text,
+  p_event_type text,
+  p_provider_payment_id text,
+  p_status text,
+  p_amount_minor bigint,
+  p_currency text,
+  p_payload jsonb DEFAULT '{}'::jsonb
+) RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, public, private
+AS $$
+DECLARE
+  v_tx public.payment_transactions%ROWTYPE;
+  v_plan_id uuid;
+  v_interval text;
+  v_processed integer;
+  v_event_payload jsonb;
+BEGIN
+  IF p_provider NOT IN ('recurrente','paypal') OR p_event_id IS NULL OR length(p_event_id) > 255 THEN
+    RAISE EXCEPTION 'INVALID_PAYMENT_EVENT' USING ERRCODE = '22023';
+  END IF;
+  IF p_status NOT IN ('succeeded','failed','canceled','refunded') THEN
+    RAISE EXCEPTION 'INVALID_PAYMENT_STATUS' USING ERRCODE = '22023';
+  END IF;
+
+  SELECT * INTO v_tx
+  FROM public.payment_transactions t
+  WHERE t.provider = p_provider AND t.provider_payment_id = p_provider_payment_id
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN false; END IF;
+
+  -- Idempotency: if the provider event was already registered, don't apply it again.
+  IF EXISTS (SELECT 1 FROM public.webhook_events WHERE provider = p_provider AND provider_event_id = p_event_id) THEN
+    RETURN true;
+  END IF;
+
+  -- A browser return and a signed provider webhook may report the same successful payment
+  -- under different event IDs. Never extend a paid period twice for the same transaction.
+  IF p_status = 'succeeded' AND v_tx.status = 'succeeded' THEN
+    INSERT INTO public.webhook_events(provider, provider_event_id, event_type, payload, status, processed_at)
+    VALUES (p_provider, p_event_id, p_event_type, jsonb_build_object('duplicate_success',true,'transaction_id',v_tx.id), 'processed', now())
+    ON CONFLICT (provider, provider_event_id) DO NOTHING;
+    RETURN true;
+  END IF;
+  IF (v_tx.status IN ('succeeded','refunded') AND p_status IN ('failed','canceled'))
+     OR (v_tx.status = 'refunded' AND p_status = 'succeeded') THEN
+    INSERT INTO public.webhook_events(provider, provider_event_id, event_type, payload, status, processed_at)
+    VALUES (p_provider, p_event_id, p_event_type, jsonb_build_object('ignored_stale_event',true,'transaction_id',v_tx.id), 'processed', now())
+    ON CONFLICT (provider, provider_event_id) DO NOTHING;
+    RETURN true;
+  END IF;
+
+  IF p_status = 'succeeded' AND (p_amount_minor <> v_tx.amount_minor OR upper(p_currency) <> upper(v_tx.currency)) THEN
+    INSERT INTO public.webhook_events(provider, provider_event_id, event_type, payload, status, processed_at)
+    VALUES (p_provider, p_event_id, p_event_type, coalesce(p_payload,'{}'::jsonb), 'failed', now())
+    ON CONFLICT (provider, provider_event_id) DO NOTHING;
+    RETURN false;
+  END IF;
+
+  v_event_payload := jsonb_build_object('verified',true,'transaction_id',v_tx.id,'status',p_status,
+    'amount_minor',p_amount_minor,'currency',upper(p_currency));
+  INSERT INTO public.webhook_events(provider, provider_event_id, event_type, payload, status, processed_at)
+  VALUES (p_provider, p_event_id, p_event_type, v_event_payload, 'processed', now())
+  ON CONFLICT (provider, provider_event_id) DO NOTHING;
+  GET DIAGNOSTICS v_processed = ROW_COUNT;
+  IF v_processed = 0 THEN RETURN true; END IF;
+
+  UPDATE public.payment_transactions
+  SET status = p_status, provider_event_id = p_event_id,
+      metadata = coalesce(metadata,'{}'::jsonb) || jsonb_build_object('last_provider_event',p_event_id,'last_event_type',p_event_type)
+  WHERE id = v_tx.id;
+
+  IF p_status = 'refunded' THEN
+    SELECT id INTO v_plan_id FROM public.subscription_plans WHERE code = 'starter-free' AND active = true;
+    UPDATE public.subscriptions
+       SET plan_id = coalesce(v_plan_id, plan_id), provider = 'manual', provider_subscription_id = NULL,
+           status = CASE WHEN v_plan_id IS NULL THEN 'past_due' ELSE 'active' END,
+           current_period_start = now(), current_period_end = NULL, updated_at = now()
+     WHERE id = v_tx.subscription_id AND organization_id = v_tx.organization_id
+       AND plan_id = coalesce((v_tx.metadata->>'target_plan_id')::uuid, plan_id);
+  END IF;
+
+  IF p_status = 'succeeded' THEN
+    BEGIN v_plan_id := (v_tx.metadata->>'target_plan_id')::uuid;
+    EXCEPTION WHEN invalid_text_representation THEN v_plan_id := NULL; END;
+    IF v_plan_id IS NULL OR NOT EXISTS (SELECT 1 FROM public.subscription_plans WHERE id = v_plan_id AND active = true) THEN
+      RAISE EXCEPTION 'PAYMENT_TARGET_PLAN_INVALID';
+    END IF;
+    SELECT CASE WHEN interval_code = 'annual' THEN 'year' WHEN interval_code = 'quarterly' THEN 'quarter' ELSE 'month' END
+      INTO v_interval FROM public.subscription_plans WHERE id = v_plan_id;
+    UPDATE public.subscriptions
+       SET plan_id = v_plan_id,
+           provider = p_provider,
+           provider_subscription_id = coalesce(provider_subscription_id, p_provider_payment_id),
+           status = 'active', current_period_start = now(),
+           current_period_end = CASE WHEN v_interval = 'year' THEN now() + interval '1 year' WHEN v_interval = 'quarter' THEN now() + interval '3 months' ELSE now() + interval '1 month' END,
+           updated_at = now()
+     WHERE id = v_tx.subscription_id AND organization_id = v_tx.organization_id;
+    IF NOT FOUND THEN RAISE EXCEPTION 'SUBSCRIPTION_NOT_FOUND'; END IF;
+    INSERT INTO public.audit_events (organization_id, actor_user_id, action, entity_type, entity_id, metadata)
+    VALUES (v_tx.organization_id, NULL, 'billing.payment_succeeded', 'payment_transaction', v_tx.id,
+      jsonb_build_object('provider',p_provider,'plan_id',v_plan_id,'amount_minor',v_tx.amount_minor,'currency',v_tx.currency));
+  END IF;
+  RETURN true;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.apply_verified_payment(text,text,text,text,text,bigint,text,jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION private.apply_verified_payment(text,text,text,text,text,bigint,text,jsonb) TO ingenieroai_runtime;
+
+-- Auth.js and tenant metadata grants. RLS still limits rows; membership writes remain
+-- available only through SECURITY DEFINER provisioning functions.
+GRANT CONNECT ON DATABASE neondb TO ingenieroai_runtime;
+GRANT USAGE ON SCHEMA public, private TO ingenieroai_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.users, public.accounts, public.sessions, public.verification_token TO ingenieroai_runtime;
+GRANT SELECT ON public.roles, public.organizations, public.memberships, public.subscription_plans TO ingenieroai_runtime;
+ALTER TABLE public.memberships ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS memberships_self_select ON public.memberships;
+CREATE POLICY memberships_self_select ON public.memberships FOR SELECT TO ingenieroai_runtime
+  USING (user_id = private.current_user_id());
+ALTER TABLE public.subscription_plans ENABLE ROW LEVEL SECURITY;
+
+-- Tenant-scoped server APIs use runtime role + transaction-local app.user_id. Keep writes
+-- limited to CRUD pages that are actually implemented; broader domain tables remain read-only
+-- until their server actions are built and reviewed. RLS applies to every tenant table.
+GRANT SELECT ON public.customers, public.opportunities, public.collections,
+  public.appointments, public.orders, public.drivers, public.vehicles,
+  public.routes, public.deliveries, public.cod_transactions,
+  public.organization_modules, public.localization_settings, public.ai_agents,
+  public.automation_rules, public.automation_runs, public.ai_usage_events TO ingenieroai_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads, public.products TO ingenieroai_runtime;
+GRANT SELECT ON public.subscriptions TO ingenieroai_runtime;
+GRANT SELECT, INSERT, UPDATE ON public.payment_transactions TO ingenieroai_runtime;
+GRANT EXECUTE ON FUNCTION private.current_user_id() TO ingenieroai_runtime;
+GRANT EXECUTE ON FUNCTION private.is_org_member(uuid) TO ingenieroai_runtime;
+
+COMMIT;

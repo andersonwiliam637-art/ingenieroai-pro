@@ -1,41 +1,34 @@
--- Run as database owner AFTER 01-runtime-role-bootstrap.template.sql and verifying role attributes.
--- Create this role with SQL, NOT Neon Console/API/CLI; those methods grant neon_superuser membership.
--- Never grant BYPASSRLS. Stop if role attributes or inherited memberships are elevated.
--- Review this allow-list against actual server-side routes before each release.
-
+-- Least-privilege grants for the existing IngenieroAI.pro runtime role.
+-- Run only after the role exists with LOGIN, NOSUPERUSER, NOCREATEDB, NOCREATEROLE,
+-- NOREPLICATION and NOBYPASSRLS. This template does not create/reset passwords.
+BEGIN;
 GRANT CONNECT ON DATABASE neondb TO ingenieroai_runtime;
 GRANT USAGE ON SCHEMA public, private TO ingenieroai_runtime;
 
--- Auth.js adapter server-only tables.
+-- Auth.js PostgreSQL adapter tables (server-side only; never expose DATABASE_URL to the browser).
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.users, public.accounts,
   public.sessions, public.verification_token TO ingenieroai_runtime;
 
--- Identity/membership and reference data: read-only to application runtime.
+-- Tenant identity and plan catalog are read-only from application code. RLS/policies apply.
 GRANT SELECT ON public.memberships, public.organizations, public.roles,
-  public.permissions, public.role_permissions, public.organization_modules,
   public.subscription_plans TO ingenieroai_runtime;
 
--- Operational tenant tables. RLS policies scope all organization_id tables.
-GRANT SELECT, INSERT, UPDATE, DELETE ON public.customers, public.files,
-  public.notifications, public.leads, public.opportunities, public.quotes,
-  public.products, public.collections, public.appointments, public.orders,
-  public.drivers, public.vehicles, public.routes, public.deliveries,
-  public.cod_transactions, public.localization_settings, public.ai_agents,
-  public.automation_rules, public.automation_runs, public.ai_usage_events
-  TO ingenieroai_runtime;
+-- Only CRUD paths currently implemented in the MVP may mutate business rows.
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.leads, public.products TO ingenieroai_runtime;
+GRANT SELECT ON public.customers, public.opportunities, public.collections,
+  public.appointments, public.orders, public.drivers, public.vehicles,
+  public.routes, public.deliveries, public.cod_transactions,
+  public.organization_modules, public.localization_settings, public.ai_agents,
+  public.automation_rules, public.automation_runs, public.ai_usage_events TO ingenieroai_runtime;
 
--- Append/read audit. No mutation or deletion of audit history from app runtime.
-GRANT SELECT, INSERT ON public.audit_events TO ingenieroai_runtime;
-GRANT USAGE, SELECT ON SEQUENCE public.audit_events_id_seq TO ingenieroai_runtime;
+-- Checkout creates pending transactions; verified-payment functions change subscription state.
+GRANT SELECT ON public.subscriptions TO ingenieroai_runtime;
+GRANT SELECT, INSERT, UPDATE ON public.payment_transactions TO ingenieroai_runtime;
 
--- Financial state is read-only here; provider-signed webhook processing must use a
--- separate narrowly scoped service role/path with signature verification and idempotency.
-GRANT SELECT ON public.subscriptions, public.payment_transactions TO ingenieroai_runtime;
--- Intentionally NO runtime grant on public.webhook_events.
-
--- Narrow helper execution required by RLS policies. Do not grant all private functions.
+-- SECURITY DEFINER provisioning/payment functions own membership/subscription/audit writes.
 GRANT EXECUTE ON FUNCTION private.current_user_id() TO ingenieroai_runtime;
 GRANT EXECUTE ON FUNCTION private.is_org_member(uuid) TO ingenieroai_runtime;
-
--- Verify effective privileges after applying grants using 03-runtime-role-verification.sql.
--- Do not treat this grants template as proof of tenant isolation.
+GRANT EXECUTE ON FUNCTION private.request_organization_registration(text,text,text,text,text) TO ingenieroai_runtime;
+GRANT EXECUTE ON FUNCTION private.provision_pending_organization(uuid) TO ingenieroai_runtime;
+GRANT EXECUTE ON FUNCTION private.apply_verified_payment(text,text,text,text,text,bigint,text,jsonb) TO ingenieroai_runtime;
+COMMIT;
