@@ -127,5 +127,11 @@ ON public.subscriptions
 FOR EACH ROW
 WHEN (OLD.plan_id IS DISTINCT FROM NEW.plan_id)
 EXECUTE FUNCTION private.sync_subscription_modules_from_plan();
+-- Sincronizar módulos al crear una suscripción.
+CREATE TRIGGER subscriptions_sync_modules_on_insert
+AFTER INSERT
+ON public.subscriptions
+FOR EACH ROW
+EXECUTE FUNCTION private.sync_subscription_modules_from_plan();
 
 COMMIT;
