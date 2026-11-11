@@ -10,6 +10,15 @@ export const metadata = { title: "Planes y cobros | IngenieroAI.pro" };
 type Plan = { id: string; code: string; name: string; amount_minor: string; currency_code: string; interval_code: string; region: string; features: Record<string, unknown> };
 type Current = { organization_id: string; organization_name: string; region: string; currency_code: string; plan_name: string | null; subscription_status: string | null; current_period_end: string | null; role_code: string };
 
+const recurrenteLinks: Record<string, string> = {
+  "pro-gtq-monthly": "https://app.recurrente.com/s/willy-salan/pro-guatemala",
+  "business-gtq-monthly": "https://app.recurrente.com/s/willy-salan/bussines-guatemala",
+  "pro-usd-monthly": "https://app.recurrente.com/s/willy-salan/pro-internacional",
+  "business-usd-monthly": "https://app.recurrente.com/s/willy-salan/bussines-international",
+  "pro-uae-usd-monthly": "https://app.recurrente.com/s/willy-salan/pro-uae",
+  "business-uae-usd-monthly": "https://app.recurrente.com/s/willy-salan/business-uae",
+};
+
 const moduleLabels: Record<string, string> = {
   crm: "Gestión de clientes (CRM)", sales: "Ventas y oportunidades", inventory: "Control de inventario",
   collections: "Cobros y cuentas por cobrar", calendar: "Agenda y calendario", reports: "Reportes del negocio",
@@ -113,7 +122,7 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
                   <small>{plan.currency_code} · {plan.interval_code === "annual" ? "por año" : plan.interval_code === "quarterly" ? "por trimestre" : Number(plan.amount_minor) === 0 ? "sin costo" : "por mes"}</small></div>
                 {Number(plan.amount_minor) === 0
                   ? <span className="billing-included">Plan gratuito</span>
-                  : <CheckoutActions planCode={plan.code} currency={plan.currency_code} canCheckout={paymentsEnabled && canManage} />}
+                  : <CheckoutActions planCode={plan.code} currency={plan.currency_code} canCheckout={paymentsEnabled && canManage} recurrenteUrl={recurrenteLinks[plan.code]} />}
               </div>)}
             </div>
           </article>;
