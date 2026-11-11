@@ -23,15 +23,18 @@ export default function CheckoutActions({ planCode, currency, canCheckout }: { p
     }
   }
 
-  return <div className="checkout-actions">
-    <button className="button primary" disabled={!canCheckout || !recurrenteSupported || pending !== null} onClick={() => checkout("recurrente")}>
-      {pending === "recurrente" ? "Conectando…" : "Pagar con Recurrente"}
-    </button>
-    <button className="button" disabled={!canCheckout || !paypalSupported || pending !== null} onClick={() => checkout("paypal")}>
-      {pending === "paypal" ? "Conectando…" : "Pagar con PayPal"}
-    </button>
-    {!recurrenteSupported || !paypalSupported ? <p className="form-hint">Moneda de este plan: {currency}. Recurrente admite GTQ/USD; esta integración de PayPal está limitada a USD.</p> : null}
-    {!canCheckout ? <p className="form-hint">El pago aún no está habilitado para producción o tu usuario no tiene permisos de propietario/administrador.</p> : null}
-    {error ? <p className="form-message error" role="alert">{error}</p> : null}
+  return <div className="billing-checkout">
+    <div className="billing-provider-buttons">
+      <button className="billing-provider billing-provider-primary" disabled={!canCheckout || !recurrenteSupported || pending !== null} onClick={() => checkout("recurrente")}>
+        {pending === "recurrente" ? "Conectando…" : "Recurrente"}
+      </button>
+      <button className="billing-provider" disabled={!canCheckout || !paypalSupported || pending !== null} onClick={() => checkout("paypal")}>
+        {pending === "paypal" ? "Conectando…" : "PayPal"}
+      </button>
+    </div>
+    {!recurrenteSupported ? <p className="billing-hint">Recurrente no está habilitado para {currency}.</p> : null}
+    {!paypalSupported ? <p className="billing-hint">PayPal está disponible en esta integración únicamente para USD.</p> : null}
+    {!canCheckout ? <p className="billing-hint">Pagos desactivados temporalmente o se requiere rol de propietario/administrador.</p> : null}
+    {error ? <p className="billing-error" role="alert">{error}</p> : null}
   </div>;
 }
