@@ -122,14 +122,14 @@ export default async function BillingPage({ searchParams }: { searchParams: Prom
                   <small>{plan.currency_code} · {plan.interval_code === "annual" ? "por año" : plan.interval_code === "quarterly" ? "por trimestre" : Number(plan.amount_minor) === 0 ? "sin costo" : "por mes"}</small></div>
                 {Number(plan.amount_minor) === 0
                   ? <span className="billing-included">Plan gratuito</span>
-                  : <CheckoutActions planCode={plan.code} currency={plan.currency_code} canCheckout={paymentsEnabled && canManage} recurrenteUrl={recurrenteLinks[plan.code]} />}
+                  : <CheckoutActions planCode={plan.code} planName={plan.name} currency={plan.currency_code} amountLabel={formatMoney(plan.amount_minor, plan.currency_code)} organizationName={current.organization_name} recurrenteUrl={recurrenteLinks[plan.code]} />}
               </div>)}
             </div>
           </article>;
         })}
       </div>
     </section>
-    {!paymentsEnabled ? <p className="billing-disabled-note">Los pagos están temporalmente desactivados. Los botones se muestran para que puedas revisar las opciones, pero no se iniciará ningún cobro hasta completar y verificar las credenciales y webhooks de los proveedores.</p> : null}
+    {!paymentsEnabled ? <p className="billing-disabled-note">La activación automática de una suscripción depende de que el servidor valide correctamente el pago y lo asocie a esta empresa. Para depósito o transferencia, solicita los datos por WhatsApp y el plan se activará desde administración después de verificar el ingreso.</p> : null}
     <footer className="billing-security"><strong>Pagos verificados y activación segura</strong><p>La suscripción solo cambia cuando el servidor valida la notificación del proveedor, el importe, la moneda y la operación. Volver desde la página de pago no activa una licencia por sí solo.</p></footer>
   </main>;
 }
