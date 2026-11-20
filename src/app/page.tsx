@@ -83,7 +83,7 @@ export default function Home() {
           <div className="home-plan-users">{plan.users}</div>
           <ul>{plan.features.map((feature) => <li key={feature}>{feature}</li>)}</ul>
           <Link className={`home-plan-action ${plan.featured ? "home-plan-action-light" : ""}`} href="/register">{plan.action}</Link>
-          {plan.code !== "starter" ? <p className="home-provider-note">Recurrente: GTQ y USD · PayPal: USD</p> : <p className="home-provider-note">Sin tarjeta para comenzar</p>}
+          {plan.code !== "starter" ? <><a className="home-plan-contact" href={`https://wa.me/50254164016?text=${encodeURIComponent(`Hola, quiero información para contratar el plan ${plan.name} de IngenieroAI.pro (${plan.price}). Deseo conocer el proceso de pago por depósito o transferencia.`)}`} target="_blank" rel="noopener noreferrer">Contratar por WhatsApp</a><p className="home-provider-note">Recurrente: pago en línea · WhatsApp: depósito o transferencia</p></> : <p className="home-provider-note">Sin tarjeta para comenzar</p>}
         </article>)}
       </div>
       <p className="home-pricing-footnote">Los importes se muestran por mes. La moneda y los medios de pago disponibles se confirman según la región y configuración de tu empresa. Los pagos se procesan de forma segura y la suscripción se activa tras la validación del proveedor.</p>
